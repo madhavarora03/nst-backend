@@ -101,4 +101,3 @@ for epoch in range(EPOCHS):
         name = f"output/{str(epoch)}_generated.png"
         save_image(generated_image, name)
 
-print(f"")
