@@ -30,7 +30,7 @@ pip install -r requirements.txt
 
 ### 4. Run the generator script to get outputs.
 ```bash
-python generator.py
+python app/generator.py
 ```
 
 ## License
