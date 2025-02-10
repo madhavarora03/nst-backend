@@ -2,20 +2,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from typing import Union
 from config import db
 from fastapi import FastAPI
+from routes import health_check
 
-app = (FastAPI())
+app = FastAPI()
 
 print(db.name)
 
-
-@app.get("/")
-def read_root():
-    return {"Hello": "World"}
-
-
-@app.get("/items/{item_id}")
-def read_item(item_id: int, q: Union[str, None] = None):
-    return {"item_id": item_id, "q": q}
+app.include_router(health_check.router, prefix="/health-check")

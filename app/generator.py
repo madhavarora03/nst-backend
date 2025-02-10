@@ -7,16 +7,16 @@ from uuid import uuid4
 import torch
 from torchvision import transforms
 
-from TransformerNet import TransformerNet
 from utils import load_image, save_image
+from utils.TransformerNet import TransformerNet
 
 warnings.filterwarnings("ignore")
 
 StyleTypes = Literal["mosaic", "candy", "rain_princess", "udnie"]
 
 
-def generate(content_path: Path,
-             style: StyleTypes = "mosaic") -> Path:
+def generate_image(content_path: Path,
+                   style: StyleTypes = "mosaic") -> Path:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
@@ -49,3 +49,6 @@ def generate(content_path: Path,
     save_image(output_path, output)
     return output_path
 
+
+path = Path("sample/content.jpg")
+generate_image(path)
