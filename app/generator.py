@@ -1,108 +1,162 @@
+import re
 import warnings
 from pathlib import Path
 
+import cv2
+import numpy as np
 import torch
-from torch import nn
-from torch.optim import Adam
-from torchvision import models, transforms
-from torchvision.utils import save_image
+from torchvision import transforms
 
-from utils import compute_loss, load_image
+from utils import load_image
 
 warnings.filterwarnings("ignore")
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Set hyperparameters
-EPOCHS = 12000
-LR = 1e-3
-alpha = 1
-beta = 0.01
 
-
-class VGG19(nn.Module):
+class TransformerNet(torch.nn.Module):
     def __init__(self):
-        super(VGG19, self).__init__()
+        super(TransformerNet, self).__init__()
+        # Initial convolution layers
+        self.conv1 = ConvLayer(3, 32, kernel_size=9, stride=1)
+        self.in1 = torch.nn.InstanceNorm2d(32, affine=True)
+        self.conv2 = ConvLayer(32, 64, kernel_size=3, stride=2)
+        self.in2 = torch.nn.InstanceNorm2d(64, affine=True)
+        self.conv3 = ConvLayer(64, 128, kernel_size=3, stride=2)
+        self.in3 = torch.nn.InstanceNorm2d(128, affine=True)
+        # Residual layers
+        self.res1 = ResidualBlock(128)
+        self.res2 = ResidualBlock(128)
+        self.res3 = ResidualBlock(128)
+        self.res4 = ResidualBlock(128)
+        self.res5 = ResidualBlock(128)
+        # Upsampling Layers
+        self.deconv1 = UpsampleConvLayer(128, 64, kernel_size=3, stride=1, upsample=2)
+        self.in4 = torch.nn.InstanceNorm2d(64, affine=True)
+        self.deconv2 = UpsampleConvLayer(64, 32, kernel_size=3, stride=1, upsample=2)
+        self.in5 = torch.nn.InstanceNorm2d(32, affine=True)
+        self.deconv3 = ConvLayer(32, 3, kernel_size=9, stride=1)
+        # Non-linearities
+        self.relu = torch.nn.ReLU()
 
-        self.chosen_features = ["0", "5", "10", "19", "28"]
-        self.model = models.vgg19(pretrained=True).features[:29]
+    def forward(self, X):
+        y = self.relu(self.in1(self.conv1(X)))
+        y = self.relu(self.in2(self.conv2(y)))
+        y = self.relu(self.in3(self.conv3(y)))
+        y = self.res1(y)
+        y = self.res2(y)
+        y = self.res3(y)
+        y = self.res4(y)
+        y = self.res5(y)
+        y = self.relu(self.in4(self.deconv1(y)))
+        y = self.relu(self.in5(self.deconv2(y)))
+        y = self.deconv3(y)
+        return y
+
+
+class ConvLayer(torch.nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride):
+        super(ConvLayer, self).__init__()
+        reflection_padding = kernel_size // 2
+        self.reflection_pad = torch.nn.ReflectionPad2d(reflection_padding)
+        self.conv2d = torch.nn.Conv2d(in_channels, out_channels, kernel_size, stride)
 
     def forward(self, x):
-        features = []
-
-        for layer_num, layer in enumerate(self.model):
-            x = layer(x)
-
-            if str(layer_num) in self.chosen_features:
-                features.append(x)
-
-        return features
+        out = self.reflection_pad(x)
+        out = self.conv2d(out)
+        return out
 
 
-def generate(content_path: Path,
-             style_path: Path,
-             output_folder: Path) -> None:
+class ResidualBlock(torch.nn.Module):
+    """ResidualBlock
+    introduced in: https://arxiv.org/abs/1512.03385
+    recommended architecture: http://torch.ch/blog/2016/02/04/resnets.html
     """
-    Performs neural style transfer by generating an image that combines
-    the content of the `content_image` and the style of the `style_image`
-    using a pre-trained VGG19 model.
 
-    Args:
-        content_path (Path): Path to the content image. This image will
-                              provide the content for the generated image.
-        style_path (Path): Path to the style image. This image will provide
-                            the style for the generated image.
-        output_folder (Path): Path to the folder where the generated images
-                               will be saved at specified intervals.
+    def __init__(self, channels):
+        super(ResidualBlock, self).__init__()
+        self.conv1 = ConvLayer(channels, channels, kernel_size=3, stride=1)
+        self.in1 = torch.nn.InstanceNorm2d(channels, affine=True)
+        self.conv2 = ConvLayer(channels, channels, kernel_size=3, stride=1)
+        self.in2 = torch.nn.InstanceNorm2d(channels, affine=True)
+        self.relu = torch.nn.ReLU()
 
-    Returns:
-        None: The function saves the generated images to the output folder
-              during the training process at regular intervals.
+    def forward(self, x):
+        residual = x
+        out = self.relu(self.in1(self.conv1(x)))
+        out = self.in2(self.conv2(out))
+        out = out + residual
+        return out
+
+
+class UpsampleConvLayer(torch.nn.Module):
+    """UpsampleConvLayer
+    Upsamples the input and then does a convolution. This method gives better results
+    compared to ConvTranspose2d.
+    ref: http://distill.pub/2016/deconv-checkerboard/
     """
-    # Create model instance and set to eval mode
-    model = VGG19().to(device).eval()
 
-    ### Uncomment to see model architecture in terminal ###
-    # summary(model, (32, 3, 224, 224))
+    def __init__(self, in_channels, out_channels, kernel_size, stride, upsample=None):
+        super(UpsampleConvLayer, self).__init__()
+        self.upsample = upsample
+        reflection_padding = kernel_size // 2
+        self.reflection_pad = torch.nn.ReflectionPad2d(reflection_padding)
+        self.conv2d = torch.nn.Conv2d(in_channels, out_channels, kernel_size, stride)
 
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor()
-    ])
+    def forward(self, x):
+        x_in = x
+        if self.upsample:
+            x_in = torch.nn.functional.interpolate(x_in, mode='nearest', scale_factor=self.upsample)
+        out = self.reflection_pad(x_in)
+        out = self.conv2d(out)
+        return out
 
-    # Load content and style images
-    content_image = load_image(content_path, transform, device=device)
-    style_image = load_image(style_path, transform, device=device)
 
-    # Initialize generated image
-    generated_image = content_image.clone().requires_grad_(True)
+# Create model instance and set to eval mode
+model = TransformerNet()
+state_dict = torch.load("checkpoints/mosaic.pth")
+for k in list(state_dict.keys()):
+    if re.search(r'in\d+\.running_(mean|var)$', k):
+        del state_dict[k]
 
-    # Create Optimizer
-    optimizer = Adam(params=[generated_image], lr=LR, weight_decay=beta)
+model.load_state_dict(state_dict)
+model.to(device).eval()
 
-    for epoch in range(EPOCHS):
-        # Obtain the convolution features in specifically chosen layers
-        generated_features = model(generated_image)
-        original_img_features = model(content_image)
-        style_features = model(style_image)
+content_image = load_image(Path("sample/content.jpg"))
+content_transform = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Lambda(lambda x: x.mul(255))
+])
+content_image = content_transform(content_image)
+content_image = content_image.unsqueeze(0).to(device)
 
-        # Calculating total loss
-        total_loss = compute_loss(generated_features, original_img_features, style_features, alpha=alpha, beta=beta)
+output = model(content_image).cpu()
+# save_image("output/output.png", output[0])
 
-        # Back propagation
-        optimizer.zero_grad()
-        total_loss.backward()
-        optimizer.step()
 
-        # Save the generated image at specified intervals
-        if epoch % 200 == 0 or epoch == EPOCHS - 1:
-            print(f"Total loss after {epoch + 1} epochs: {total_loss}")
-            name = f"{output_folder}/{str(epoch)}_generated.png"
-            save_image(generated_image, name)
+### Uncomment to see model architecture in terminal ###
+# summary(model, (32, 3, 224, 224))
+cap = cv2.VideoCapture(0)  # Open webcam
 
-# Example Usage
-content_image_path = Path("sample/content.jpg")
-style_image_path = Path("sample/style.jpg")
-output_folder_path = Path("output")
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
 
-generate(content_image_path, style_image_path, output_folder_path)
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    frame_tensor = content_transform(frame_rgb).unsqueeze(0).cuda()
+
+    with torch.no_grad():
+        output_tensor = model(frame_tensor).cpu().squeeze()
+
+    output_image = output_tensor.permute(1, 2, 0).numpy()
+    output_image = np.clip(output_image, 0, 255).astype(np.uint8)
+    output_image_bgr = cv2.cvtColor(output_image, cv2.COLOR_RGB2BGR)
+
+    cv2.imshow("Stylized Webcam", output_image_bgr)
+
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
