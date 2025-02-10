@@ -6,12 +6,15 @@ import cv2
 import numpy as np
 import torch
 from torchvision import transforms
+from ultralytics import YOLO
 
 from utils import load_image
 
 warnings.filterwarnings("ignore")
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+model_seg = YOLO("checkpoints/yolo/yolov8s-seg.pt")
 
 
 class TransformerNet(torch.nn.Module):
@@ -144,16 +147,49 @@ while True:
         break
 
     frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    frame_tensor = content_transform(frame_rgb).unsqueeze(0).cuda()
+
+    # Run YOLOv8-seg for human segmentation
+    results = model_seg(frame_rgb)
+
+    # Create an empty mask (assume background initially)
+    full_mask = np.zeros((frame.shape[0], frame.shape[1]), dtype=np.uint8)
+
+    for result in results:
+        masks = result.masks.data.cpu().numpy()  # Segmentation masks
+        cls = result.boxes.cls.cpu().numpy()  # Class labels
+
+        for i, c in enumerate(cls):
+            if int(c) == 0:  # Class 0 = Person
+                person_mask = masks[i] * 255  # Convert to uint8
+                person_mask = cv2.resize(person_mask, (frame.shape[1], frame.shape[0]))
+
+                # Merge all detected persons into one mask
+                full_mask = np.maximum(full_mask, person_mask.astype(np.uint8))
+
+    # **Ensure binary mask**
+    _, binary_mask = cv2.threshold(full_mask, 127, 255, cv2.THRESH_BINARY)
+
+    # **Invert the mask to select the background**
+    background_mask = cv2.bitwise_not(binary_mask)
+
+    # **Extract the background**
+    background = cv2.bitwise_and(frame_rgb, frame_rgb, mask=background_mask)
+
+    # **Apply style transfer to the extracted background**
+    background_tensor = content_transform(background).unsqueeze(0).to(device)
 
     with torch.no_grad():
-        output_tensor = model(frame_tensor).cpu().squeeze()
+        stylized_background = model(background_tensor).cpu().squeeze()
 
-    output_image = output_tensor.permute(1, 2, 0).numpy()
-    output_image = np.clip(output_image, 0, 255).astype(np.uint8)
-    output_image_bgr = cv2.cvtColor(output_image, cv2.COLOR_RGB2BGR)
+    # Convert back to image format
+    stylized_background = stylized_background.permute(1, 2, 0).numpy()
+    stylized_background = np.clip(stylized_background, 0, 255).astype(np.uint8)
+    stylized_background_bgr = cv2.cvtColor(stylized_background, cv2.COLOR_RGB2BGR)
 
-    cv2.imshow("Stylized Webcam", output_image_bgr)
+    # **Merge stylized background back into the frame**
+    final_frame = np.where(background_mask[..., None] > 0, stylized_background_bgr, frame)
+
+    cv2.imshow("Stylized Background", final_frame)
 
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
