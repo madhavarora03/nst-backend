@@ -16,7 +16,8 @@ StyleTypes = Literal["mosaic", "candy", "rain_princess", "udnie"]
 
 
 def generate_image(content_path: Path,
-                   style: StyleTypes = "mosaic") -> Path:
+                   style: StyleTypes = "mosaic",
+                   segment: bool = False) -> Path:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
@@ -31,6 +32,10 @@ def generate_image(content_path: Path,
     # Apply transforms to image
     content_image = content_transform(content_image).unsqueeze(0).to(device)
     _, _, w, h = content_image.shape
+
+    # Apply YOLOv8 if segment is true
+    if segment:
+        pass
 
     # Load and apply style transfer model
     model = TransformerNet()
@@ -51,4 +56,4 @@ def generate_image(content_path: Path,
 
 
 path = Path("sample/content.jpg")
-generate_image(path)
+generate_image(path, segment=True)
