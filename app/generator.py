@@ -53,7 +53,3 @@ def generate_image(content_path: Path,
 
     save_image(output_path, output)
     return output_path
-
-
-path = Path("sample/content.jpg")
-generate_image(path, segment=True)
